@@ -1,0 +1,52 @@
+# Build output
+bin/
+obj/
+logs/
+*.log
+
+# Visual Studio stuff
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vsidx   # index files
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# NuGet
+*.nupkg
+packages/
+!packages/build/
+
+# Configs we don’t want in git
+appsettings.Development.json
+appsettings.Local.json
+local.settings.json
+secrets.json
+*.key
+*.pfx
+*.snk
+
+# Test results
+TestResult*/
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# Database files
+*.mdf
+*.ldf
+*.dbmdl
+*.bak
+
+# Misc / OS files
+Thumbs.db
+.DS_Store
+
+# ReSharper etc
+_ReSharper*/
+*.DotSettings.user
