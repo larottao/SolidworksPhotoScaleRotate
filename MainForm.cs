@@ -11,7 +11,7 @@ using System.Windows.Forms;
 
 namespace PhotoScaleRotate
 {
-    public partial class MainForm : Form
+    public partial class Form1 : Form
     {
         private enum ClickMode { XAxis, YAxis, Ruler }
 
@@ -31,7 +31,7 @@ namespace PhotoScaleRotate
 
         private readonly WheelRedirectFilter _wheelFilter;
 
-        public MainForm()
+        public Form1()
         {
             InitializeComponent();
             WireUpEvents();
@@ -128,7 +128,13 @@ namespace PhotoScaleRotate
 
             canvas.Image = _original;
             canvas.ZoomToFit();
-            SetMessage($"Loaded {Path.GetFileName(_originalPath)} ({_original.Width} x {_original.Height} px). Click two points for the X axis.", isError: false);
+
+            // Restore any previously drawn axes/rulers saved next to this image.
+            string baseMsg = $"Loaded {Path.GetFileName(_originalPath)} ({_original.Width} x {_original.Height} px).";
+            string restoreMsg = TryRestoreTraceFromJson(_originalPath, _original.Width, _original.Height);
+            canvas.Invalidate();
+            SetMessage(restoreMsg.Length > 0 ? $"{baseMsg} {restoreMsg}"
+                                             : $"{baseMsg} Click two points for the X axis.", isError: false);
         }
 
         /// <summary>Loads a copy of the file (so the file is not locked) and applies EXIF orientation.</summary>
@@ -316,6 +322,152 @@ namespace PhotoScaleRotate
             File.WriteAllText(savedImagePath + ".json", json);
 
             static PointDto ToDto(PointF p) => new(p.X, p.Y);
+        }
+
+        // --- Restore (read) side ---------------------------------------------------------
+
+        // Tolerant read models: all fields nullable so partial or legacy sidecars never throw.
+        private sealed class PointReadDto { public float X { get; set; } public float Y { get; set; } }
+        private sealed class AxisReadDto { public PointReadDto? P1 { get; set; } public PointReadDto? P2 { get; set; } public float LengthMm { get; set; } }
+        private sealed class RulerReadDto { public PointReadDto? Start { get; set; } public PointReadDto? End { get; set; } }
+
+        private sealed class TraceReadDto
+        {
+            public string? OriginalImage { get; set; }
+            public string? SavedImage { get; set; }
+            public AxisReadDto? XAxisOriginalPx { get; set; }
+            public AxisReadDto? YAxisOriginalPx { get; set; }
+            public List<RulerReadDto>? RulersOriginalPx { get; set; }
+            public string? TimestampUtc { get; set; }
+        }
+
+        private static readonly JsonSerializerOptions RestoreJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        /// <summary>
+        /// Scans the loaded image's folder for a sidecar .json produced from THIS image
+        /// (its OriginalImage field matches the opened file), and restores the axes, their
+        /// mm lengths, and rulers. All stored coordinates are in original image pixels, so
+        /// they land exactly where they were drawn. If several sidecars match, the most
+        /// recent one wins. Returns a short status string, or empty when nothing is restored.
+        /// </summary>
+        private string TryRestoreTraceFromJson(string imagePath, int imageWidth, int imageHeight)
+        {
+            string? dir = Path.GetDirectoryName(imagePath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return string.Empty;
+
+            string loadedName = Path.GetFileName(imagePath);
+
+            TraceReadDto? best = null;
+            string? bestFile = null;
+            DateTime bestTime = DateTime.MinValue;
+            string? processedExportOriginal = null; // set if the opened file is itself a saved export
+
+            IEnumerable<string> jsonFiles;
+            try { jsonFiles = Directory.EnumerateFiles(dir, "*.json"); }
+            catch (Exception) { return string.Empty; } // folder access denied etc.
+
+            foreach (string jsonPath in jsonFiles)
+            {
+                TraceReadDto? dto = TryReadTrace(jsonPath);
+                if (dto == null) continue;
+
+                if (processedExportOriginal == null &&
+                    string.Equals(dto.SavedImage, loadedName, StringComparison.OrdinalIgnoreCase))
+                {
+                    processedExportOriginal = dto.OriginalImage;
+                }
+
+                if (!string.Equals(dto.OriginalImage, loadedName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                DateTime time = ParseTimestamp(dto.TimestampUtc);
+                if (best == null || time >= bestTime)
+                {
+                    best = dto;
+                    bestFile = jsonPath;
+                    bestTime = time;
+                }
+            }
+
+            if (best == null)
+            {
+                return processedExportOriginal != null
+                    ? $"This is a processed export. Open the original ({processedExportOriginal}) to see its traced lines."
+                    : string.Empty;
+            }
+
+            // Guard against a different file that happens to share the original's name.
+            if (!TraceFitsImage(best, imageWidth, imageHeight))
+                return $"Found {Path.GetFileName(bestFile)} but its marks do not fit this image - not restored.";
+
+            if (best.XAxisOriginalPx?.P1 != null && best.XAxisOriginalPx.P2 != null)
+            {
+                _x1 = new PointF(best.XAxisOriginalPx.P1.X, best.XAxisOriginalPx.P1.Y);
+                _x2 = new PointF(best.XAxisOriginalPx.P2.X, best.XAxisOriginalPx.P2.Y);
+                if (best.XAxisOriginalPx.LengthMm > 0f)
+                    textXmm.Text = best.XAxisOriginalPx.LengthMm.ToString("0.###", CultureInfo.InvariantCulture);
+            }
+            if (best.YAxisOriginalPx?.P1 != null && best.YAxisOriginalPx.P2 != null)
+            {
+                _y1 = new PointF(best.YAxisOriginalPx.P1.X, best.YAxisOriginalPx.P1.Y);
+                _y2 = new PointF(best.YAxisOriginalPx.P2.X, best.YAxisOriginalPx.P2.Y);
+                if (best.YAxisOriginalPx.LengthMm > 0f)
+                    textYmm.Text = best.YAxisOriginalPx.LengthMm.ToString("0.###", CultureInfo.InvariantCulture);
+            }
+            if (best.RulersOriginalPx != null)
+            {
+                foreach (RulerReadDto r in best.RulersOriginalPx)
+                {
+                    if (r.Start == null || r.End == null) continue;
+                    _rulers.Add((new PointF(r.Start.X, r.Start.Y), new PointF(r.End.X, r.End.Y)));
+                }
+            }
+
+            bool haveX = _x1 != null && _x2 != null;
+            bool haveY = _y1 != null && _y2 != null;
+            string axes = (haveX ? "X" : string.Empty) + (haveY ? "Y" : string.Empty);
+            string axesText = axes.Length > 0 ? $"{axes} axis" : "no axes";
+            return $"Restored trace from {Path.GetFileName(bestFile)} ({axesText}, {_rulers.Count} ruler(s)). Adjust or click Process + Save.";
+        }
+
+        private static TraceReadDto? TryReadTrace(string jsonPath)
+        {
+            try
+            {
+                string json = File.ReadAllText(jsonPath);
+                return JsonSerializer.Deserialize<TraceReadDto>(json, RestoreJsonOptions);
+            }
+            catch (Exception)
+            {
+                return null; // unrelated or malformed json - skip silently
+            }
+        }
+
+        private static DateTime ParseTimestamp(string? iso)
+        {
+            return DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime dt)
+                ? dt
+                : DateTime.MinValue;
+        }
+
+        private static bool TraceFitsImage(TraceReadDto dto, int width, int height)
+        {
+            const float margin = 2f;
+
+            bool InBounds(PointReadDto? p) =>
+                p == null || (p.X >= -margin && p.Y >= -margin && p.X <= width + margin && p.Y <= height + margin);
+
+            if (!InBounds(dto.XAxisOriginalPx?.P1) || !InBounds(dto.XAxisOriginalPx?.P2)) return false;
+            if (!InBounds(dto.YAxisOriginalPx?.P1) || !InBounds(dto.YAxisOriginalPx?.P2)) return false;
+            if (dto.RulersOriginalPx != null)
+            {
+                foreach (RulerReadDto r in dto.RulersOriginalPx)
+                    if (!InBounds(r.Start) || !InBounds(r.End)) return false;
+            }
+            return true;
         }
 
         #endregion

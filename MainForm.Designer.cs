@@ -1,6 +1,6 @@
 namespace PhotoScaleRotate
 {
-    partial class MainForm
+    partial class Form1
     {
         private System.ComponentModel.IContainer components = null;
 
